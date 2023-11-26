@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AutoScaling Policy and Listener Configuration
+
+Parameters:
+  ProjectName:
+    Description: Project Name. This will be used to Tag all resources
+    Type: String
+    Default: WordpressAWS
+  SSLEnabled:
+    Type: String
+    Description: HTTPS Listener to be configured on ALB or not
+    Default: "false"
+    AllowedValues:
+      - "false"
+      - "true"
+  SSLACMARN: 
+    Type: String
+    Description: ACM ARN of the certificate
+  AutoScalingMetric:
+    Type: String
+    Description: Autoscaling Metric
+    Default: CPU
+    AllowedValues:
+      - CPU
+      - Memory
+      - ALBRequestCount
+      - NoAutoScaling
+  TargetValue:
+    Type: Number
+    Description: Target Tracking value
+    Default: 60
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Project Details"
+        Parameters:
+          - ProjectName
+      - Label:
+          default: "SSL Configuration"
+        Parameters:
+          - SSLEnabled
+          - SSLACMARN
+      - Label:
+          default: "AutoScaling Configuration"
+        Parameters:
+          - AutoScalingMetric
+          - TargetValue
+
+    ParameterLabels:
+        ProjectName:
+          default: "Project Name"
+        SSLEnabled:
+          default: "Enable HTTPS Listener on ALB"
+        SSLACMARN:
+          default: "ACM ARN"
+        AutoScalingMetric:
+          default: "AutoScaling Property for Web Instances"
+        TargetValue:
+          default: "Target Tracking Value"
+
+
+Resources:
+
+  #Average CPU utilization of the Auto Scaling group.
+  CPUASG:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: ShouldCreateCPUASG
+    Properties:
+      AutoScalingGroupName: !ImportValue AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref TargetValue
+
+  #Average Application Load Balancer request count per target for your Auto Scaling group.
+  ALBRequestASG:
+    DependsOn: HTTPSListener #This is needed to avoid error, as listener should be ready before the alb request serving. For the moment kept https as default
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: ShouldCreateALBRequestASG
+    Properties:
+      AutoScalingGroupName: !ImportValue AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Join 
+            - '/' 
+            - - !ImportValue LoadBalancerFullName
+              - !ImportValue TargetGroupFullName
+        TargetValue: !Ref TargetValue
+
+  # Create target tracking policy on custom memory
+  MemoryASG:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: ShouldCreateMemoryASG
+    Properties:
+      AutoScalingGroupName: !ImportValue AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        CustomizedMetricSpecification:
+          Dimensions:
+            - Name: AutoScalingGroupName
+              Value: !ImportValue AutoScalingGroup
+          MetricName: MemoryUtilization
+          Namespace: CWAgent
+          Statistic: Average
+        TargetValue: !Ref TargetValue
+
+  #Listener configuration
+  HTTPSListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Condition: ShouldCreateHTTPSListener
+    Properties:
+        DefaultActions:
+        - Type: forward
+          TargetGroupArn: !ImportValue PublicAlbTargetGroup
+        LoadBalancerArn: !ImportValue ElasticLoadBalancer
+        Port: 443
+        Protocol: "HTTPS"
+        SslPolicy: "ELBSecurityPolicy-2016-08"
+        Certificates: 
+          - 
+            CertificateArn: !Ref SSLACMARN
+
+  HTTPListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Condition: ShouldCreateHTTPListener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !ImportValue PublicAlbTargetGroup
+      LoadBalancerArn: !ImportValue ElasticLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+                
+
+Conditions:
+  ShouldCreateCPUASG: !Equals [!Ref AutoScalingMetric, "CPU"]
+  ShouldCreateMemoryASG: !Equals [!Ref AutoScalingMetric, "Memory"]
+  ShouldCreateALBRequestASG: !Equals [!Ref AutoScalingMetric, "ALBRequestCount"]
+  ShouldCreateHTTPSListener: !Equals [!Ref SSLEnabled, "true"]
+  ShouldCreateHTTPListener: !Equals [!Ref SSLEnabled, "false"]

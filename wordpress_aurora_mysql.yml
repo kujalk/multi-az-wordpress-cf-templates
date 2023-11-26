@@ -1,0 +1,682 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Wordpress on EC2
+
+Parameters:
+  ProjectName:
+    Description: Project Name. This will be used to Tag all resources
+    Type: String
+    Default: WordpressAWS
+  DomainName:
+    Type: String
+    Default: mywordpress.net
+  WebAMIId:
+    Description: AMI of the Web Instances
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  WebInstanceType:
+    Description: EC2 instance type of Web Instances
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t3.medium
+      - t2.micro
+      - t2.large
+      - t2.medium
+      - r5a.large
+      - m5.large
+      - t3a.large
+      - t3.xlarge
+  DatabaseMasterUsername:
+    AllowedPattern: '^([a-zA-Z0-9]*)$'
+    Description: The Amazon RDS master username.
+    ConstraintDescription: Must contain only alphanumeric characters (minimum 8; maximum 16).
+    MaxLength: 16
+    MinLength: 3
+    Type: String
+    Default: Admin
+  DatabaseMasterPassword:
+    AllowedPattern: '^([a-zA-Z0-9`~!#$%^&*()_+,\\-])*$'
+    ConstraintDescription: >-
+      Must be letters (upper or lower), numbers, spaces, and these special
+      characters `~!#$%^&*()_+,-
+    Description: >-
+      The Amazon RDS master password. Letters, numbers, spaces, and these
+      special characters `~!#$%^&*()_+,-
+    MaxLength: 41
+    MinLength: 8
+    NoEcho: true
+    Type: String
+  BackendSubnets:
+    Description: 'A list of subnets to use when launching EC2 web instances, EFS and RDS.  Please select Subnets in all AZs'
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  FrontendSubnets:
+    Description: >-
+      A list of subnets to use when launching ALB. Please select Subnets in all AZs
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  VPC:
+    AllowedPattern: '^(vpc-)([a-z0-9]{8}|[a-z0-9]{17})$'
+    Description: The Vpc Id of an existing VPC to launch this stack in.
+    Type: 'AWS::EC2::VPC::Id'
+  WordPressDBPassword:
+    AllowedPattern: '^([a-zA-Z0-9`~!#$%^&*()_+,\\-])*$'
+    ConstraintDescription: >-
+      Must be letters (upper or lower), numbers, spaces, and these special
+      characters `~!#$%^&*()_+,-
+    Description: >-
+      The WordPress admin password. Letters, numbers, spaces, and these special
+      characters `~!#$%^&*()_+,-
+    Type: String
+    NoEcho: true
+  EC2KeyName:
+    AllowedPattern: '^([a-zA-Z0-9 @.`~!#$%^&*()_+,\\-])*$'
+    ConstraintDescription: 'Must be letters (upper or lower), numbers, and special characters.'
+    Description: SSH Key pair to be attached with Web Instances.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  BackupRetentionDays:
+    AllowedPattern: '^(?:[1-9]|[1-8][0-9]|90)$'
+    ConstraintDescription: 1 to 90 days
+    Description: No of Days to keep RDS backup (Retention Period)
+    Default: 7
+    Type: String
+  BackupWindowUTC:
+    AllowedPattern: '^([0-1]?[0-9]|2[0-3]):[0-5][0-9]-([0-1]?[0-9]|2[0-3]):[0-5][0-9]$'
+    ConstraintDescription: 'Must be in the format hh24:mi-hh24:mi'
+    Description: Backup Schedule Time in UTC
+    Default: "21:00-22:00"
+    Type: String
+  ASGMaxCount:
+    Description: Autoscaling maximum Instance Count
+    Default: 2
+    Type: Number
+  ASGMinCount:
+    Description: Autoscaling minimum Instance Count
+    Default: 1
+    Type: Number
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Project Details"
+        Parameters:
+          - ProjectName
+          - DomainName
+      - Label:
+          default: "Web Instance Configuration"
+        Parameters:
+          - WebAMIId
+          - WebInstanceType
+          - EC2KeyName
+          - ASGMaxCount
+          - ASGMinCount
+          - WordPressDBPassword
+      - Label:
+          default: "VPC and Security Configuration"
+        Parameters:
+          - VPC
+          - FrontendSubnets
+          - BackendSubnets
+      - Label:
+          default: "Database Configuration"
+        Parameters:
+          - DatabaseMasterUsername
+          - DatabaseMasterPassword
+          - BackupRetentionDays
+          - BackupWindowUTC
+
+    ParameterLabels:
+        ProjectName:
+          default: "Project Name"
+        DomainName:
+          default: "Domain Name"
+        WebAMIId:
+          default: "Web Image ID"
+        WebInstanceType:
+          default : "Instance Type"
+        EC2KeyName:
+          default : "SSH Key"
+        WordPressDBPassword:
+          default : "Wordpress Admin Password"
+        VPC:
+          default : "VPC Info"
+        FrontendSubnets:
+          default : "Subnet for ALB"
+        BackendSubnets:
+          default : "Subnet for WebInstance, RDS and EFS"
+        DatabaseMasterUsername:
+          default : "Master UserName for DB"
+        DatabaseMasterPassword:
+          default : "Master Password for DB"
+        BackupRetentionDays:
+          default : "Backup Retention"
+        BackupWindowUTC:
+          default : "Backup Window"
+        ASGMaxCount:
+          default: Maximum AutoScaling Instance Count 
+        ASGMinCount:
+          default: Minimum AutoScaling Instance Count
+
+Resources:
+
+  ElasticFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-EFS'
+
+  ElasticFileSystemMountTarget0:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref ElasticFileSystem
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+      SubnetId: !Select 
+        - 0
+        - !Ref BackendSubnets
+
+  ElasticFileSystemMountTarget1:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref ElasticFileSystem
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+      SubnetId: !Select 
+        - 1
+        - !Ref BackendSubnets
+
+  PublicAlbTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 5
+      Matcher:
+        HttpCode: '200,301,302'
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ALBTargets'
+
+  ElasticLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets: !Ref FrontendSubnets
+      SecurityGroups:
+        - !Ref PublicAlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ALB'
+
+  DatabaseCluster:
+    Type: 'AWS::RDS::DBCluster'
+    Properties:
+      DatabaseName: wordpress
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      Engine: aurora-mysql
+      MasterUsername: !Ref DatabaseMasterUsername
+      MasterUserPassword: !Ref DatabaseMasterPassword
+      Port: 3306
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+        - !Ref DatabaseSecurityGroup
+      BackupRetentionPeriod: !Ref BackupRetentionDays
+      PreferredBackupWindow: !Ref BackupWindowUTC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-DBCluster'
+
+  DatabaseInstance0:
+    Type: 'AWS::RDS::DBInstance'
+    DeletionPolicy: Delete
+    Properties:
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      DBClusterIdentifier: !Ref DatabaseCluster
+      DBInstanceClass: db.t3.small
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      Engine: aurora-mysql
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-DBInstance'
+
+  RDSSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: RDS Database Subnet Group for WordPress
+      SubnetIds: !Ref BackendSubnets
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-DBSubnetGP'
+
+  SshSourceGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for SSH
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-SSH-SG'
+
+  PublicAlbSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ALB-SG'
+
+  DatabaseSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for Amazon RDS cluster
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-DB-SG'
+
+  EfsSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for EFS mount targets
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-EFS-SG'
+
+  EfsSecurityGroupIngress:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !GetAtt 
+        - EfsSecurityGroup
+        - GroupId
+      GroupId: !GetAtt 
+        - EfsSecurityGroup
+        - GroupId
+
+  WebSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security group for web instances
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref PublicAlbSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref SshSourceGroup
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Web-SG'
+
+  WebInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WebInstanceRole
+
+  WebInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${ProjectName}-EC2-CW-SSM-Role'
+      Description: !Sub '${ProjectName} EC2 Role for CloudWatch and SSM'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogStreams'
+                Resource:
+                  - 'arn:aws:logs:*:*:*'
+      Tags:
+        - Key: Project
+          Value: !Sub '${ProjectName}'
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy'
+
+  WebAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      Cooldown: 600
+      HealthCheckGracePeriod: 1200
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchConfiguration
+        Version: !GetAtt WebLaunchConfiguration.LatestVersionNumber
+      MaxSize: !Ref ASGMaxCount
+      MinSize: !Ref ASGMinCount
+      TargetGroupARNs:
+        - !Ref PublicAlbTargetGroup
+      VPCZoneIdentifier: !Ref BackendSubnets
+      Tags:
+      - Key: ASGName
+        PropagateAtLaunch: True
+        Value: !Sub '${ProjectName}-ASG'
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    
+  #Create SSM parameter Store for CW unified agent configuration on Linux
+  SSMParameterStore:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub 'AmazonCloudWatch-Linux-${AWS::StackName}'
+      Type: String
+      Value: |
+        {
+                "agent": {
+                        "metrics_collection_interval": 60
+                },
+                "metrics": {
+                        "append_dimensions": {
+                                "AutoScalingGroupName": "${aws:AutoScalingGroupName}",
+                                "InstanceId": "${aws:InstanceId}"
+                        },
+                        "aggregation_dimensions" : [["AutoScalingGroupName"]],
+                        "metrics_collected": {
+                                "mem": {
+                                        "measurement": [
+                                                 {"name": "mem_used_percent", "rename": "MemoryUtilization", "unit": "Percent"}
+                                        ],
+                                        "metrics_collection_interval": 60
+                                }
+                        }
+                }
+        }
+      Description: SSM Parameter for AmazonCloudWatch Linux fleet.
+
+  WebLaunchConfiguration:
+    DependsOn: DatabaseInstance0
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          deploy_webserver:
+            - install_CWAgent
+            - install_webserver
+        install_CWAgent:
+          commands:
+            1-DownloadCWAgent:
+              command: wget https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+            2-InstallCWAgent:
+              command: rpm -U ./amazon-cloudwatch-agent.rpm
+            3-RemoveCWAgentRPM:
+              command: rm -f ./amazon-cloudwatch-agent.rpm
+            4-StopCWAgentService:
+              command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop
+            5-ConfigureCWAgent:
+              command: !Sub |
+                /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:${SSMParameterStore} -s
+
+        install_webserver:
+          files:
+
+            /tmp/install_packages.sh:
+              content: |
+                #!/bin/bash -xe
+                sudo yum install -y mysql
+                sudo yum install -y httpd
+                sudo service httpd start
+              mode: 000500
+              owner: root
+              group: root
+
+            /tmp/setup.mysql:
+                content: !Sub |
+                      CREATE USER IF NOT EXISTS 'wordpress' IDENTIFIED BY '${WordPressDBPassword}';
+                      GRANT ALL PRIVILEGES ON wordpress.* TO wordpress;
+                      FLUSH PRIVILEGES;
+                mode: 000500
+                owner: root
+                group: root
+
+            /tmp/wordpress.sh:
+                content: !Sub 
+                -  |
+                    wget https://wordpress.org/latest.tar.gz
+                    tar -xzf latest.tar.gz
+                    cp wordpress/wp-config-sample.php wordpress/wp-config.php
+
+                    sed -i "s/'database_name_here'/'wordpress'/g" wordpress/wp-config.php
+                    sed -i "s/'username_here'/'wordpress'/g" wordpress/wp-config.php
+                    sed -i "s/'password_here'/'${WordPressDBPassword}'/g" wordpress/wp-config.php
+                    sed -i "s/'localhost'/'${dbAddr}'/g" wordpress/wp-config.php
+
+                    amazon-linux-extras install -y  php8.2
+                    sudo cp -r wordpress/* /var/www/html/
+
+                    sed -i "/require_once.*/ iif (\$_SERVER['HTTP_X_FORWARDED_PROTO'] == 'https') \$_SERVER['HTTPS']='on';" /var/www/html/wp-config.php
+
+                    cd /var/www/html
+                    sudo find . -exec chown ec2-user:apache {} +
+                    sudo find . -type f -exec chmod 664 {} +
+                    sudo find . -type d -exec chmod 775 {} +
+                    sudo chmod 660 wp-config.php
+
+                    sudo service httpd restart 
+                    
+                - dbAddr: !GetAtt DatabaseCluster.Endpoint.Address
+                mode: 000500
+                owner: root
+                group: root
+
+          commands:
+            01_configure_wordpress:
+              command: ./install_packages.sh
+              cwd: /tmp
+              ignoreErrors: false
+
+            02_create_database:
+              command: !Sub 
+                 - |
+                   mysql -u ${DatabaseMasterUsername} -h ${dbAddr} --password='${DatabaseMasterPassword}' < /tmp/setup.mysql
+                 - dbAddr: !GetAtt DatabaseCluster.Endpoint.Address
+              ignoreErrors: false
+
+            03_configure_wordpress:
+              command: ./wordpress.sh
+              cwd: /tmp
+              ignoreErrors: false
+    Properties: 
+      LaunchTemplateName: !Sub '${ProjectName}-LaunchTemplate'
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt WebInstanceProfile.Arn
+        ImageId: !Ref WebAMIId
+        InstanceType: !Ref WebInstanceType
+        KeyName: !Ref EC2KeyName
+        SecurityGroupIds:
+          - !GetAtt  WebSecurityGroup.GroupId
+        UserData:
+            "Fn::Base64":
+              !Sub |
+                #!/bin/bash -xe
+                yum update -y
+                mkdir -p /var/www/html
+                mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${ElasticFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html
+                echo ${ElasticFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html nfs4 defaults,_netdev 0 0 >> /etc/fstab
+                /opt/aws/bin/cfn-init --configsets deploy_webserver --verbose --stack ${AWS::StackName} --resource WebLaunchConfiguration --region ${AWS::Region}
+                /opt/aws/bin/cfn-signal --exit-code $? --stack ${AWS::StackName} --resource WebAutoScalingGroup --region ${AWS::Region}
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-WebInstance'
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-EBSVolume'
+
+
+  lifecycleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-DLM-Role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dlm.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: DLM-ExecutionRole-Policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ec2:CreateSnapshot
+                  - ec2:DeleteSnapshot
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:ModifyVolumeAttribute
+                Resource: '*'
+      Tags:
+        - Key: Purpose
+          Value: !Sub '${ProjectName}-DLM-Role'
+
+  BasicLifecyclePolicy:
+    Type: "AWS::DLM::LifecyclePolicy"
+    Properties:
+      Description: "Lifecycle Policy using CloudFormation"
+      State: "ENABLED"
+      ExecutionRoleArn: !GetAtt
+        - lifecycleRole
+        - Arn
+      PolicyDetails:
+        ResourceTypes:
+          - "VOLUME"
+        TargetTags:
+          - Key: Name
+            Value: !Sub '${ProjectName}-EBSVolume'
+        Schedules:
+          -
+            Name: "Daily Snapshots"
+            TagsToAdd:
+              -
+                Key: "type"
+                Value: "DailySnapshot"
+            CreateRule:
+              Interval: 24
+              IntervalUnit: "HOURS"
+              Times:
+                - "09:00"
+            RetainRule:
+              Count: 7
+            CopyTags: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-EBS-Backup'
+
+  DomainZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub '${ProjectName}-HostedZone'
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref DomainZone
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ElasticLoadBalancer.DNSName
+        HostedZoneId: !GetAtt ElasticLoadBalancer.CanonicalHostedZoneID
+
+Outputs:
+  LoadBalancerUrl:
+    Description: The URL of the ALB
+    Value: !GetAtt ElasticLoadBalancer.DNSName
+    Export:
+      Name: LoadBalancerUrl
+  SecurityGroupID:
+    Description: SecurityGroup for Wordpress Web Instances. Attach to Bastion host
+    Value: !GetAtt SshSourceGroup.GroupId
+    Export:
+      Name: SecurityGroupID
+  AutoScalingGroup:
+    Description: AutoScaling Group Name
+    Value: !Ref WebAutoScalingGroup
+    Export:
+      Name: AutoScalingGroup
+  PublicAlbTargetGroup:
+    Description:  ALB Target Group ARN
+    Value: !Ref PublicAlbTargetGroup
+    Export:
+      Name: PublicAlbTargetGroup
+  ElasticLoadBalancer:
+    Description:  ALB ARN
+    Value: !Ref ElasticLoadBalancer
+    Export:
+      Name: ElasticLoadBalancer
+  LoadBalancerFullName:
+    Description:  LoadBalancer FullName
+    Value: !GetAtt ElasticLoadBalancer.LoadBalancerFullName
+    Export:
+      Name: LoadBalancerFullName
+  TargetGroupFullName:
+    Description:  TargetGroup FullName
+    Value: !GetAtt PublicAlbTargetGroup.TargetGroupFullName
+    Export:
+      Name: TargetGroupFullName
