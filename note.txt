@@ -1,0 +1,12 @@
+- aurora serverless template does not create any db instance and it crete only the cluster. It is compatible with Mysql 5.6 version 
+- aurora-mysql is server based and required instance to be created. The db instance creation takes time, therefore need to add explicit depends_on statement. This is based only
+  mysql > 5.7 and support 8.0 also 
+  
+- Queries for < mysql 5.7 
+    GRANT ALL ON wordpress.* TO 'wordpress' IDENTIFIED BY '${WordPressDBPassword}';
+    FLUSH PRIVILEGES;
+
+- Queries for > mysql 5.7
+    CREATE USER IF NOT EXISTS 'wordpress' IDENTIFIED BY '${WordPressDBPassword}';
+    GRANT ALL PRIVILEGES ON wordpress.* TO wordpress;
+    FLUSH PRIVILEGES;
