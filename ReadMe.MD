@@ -34,6 +34,10 @@ This CloudFormation (CF) template is for deploying a Wordpress site on Amazon We
 
 After the resource is created, go to CF output and open the LB url
 
+# Blog
+
+https://scripting4ever.wordpress.com/2023/11/26/empowering-scalable-and-secure-wordpress-deployments-on-aws-a-deep-dive-into-infrastructure-templates/
+
 # Developer
 
 Janarthanan Kugathasan
