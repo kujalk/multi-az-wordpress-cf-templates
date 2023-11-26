@@ -18,17 +18,17 @@ This CloudFormation (CF) template is for deploying a Wordpress site on Amazon We
 
 # The resources that this CF template creates are:
 
-Elastic File System (EFS): A file system to store the Wordpress files.
+- Elastic File System (EFS): A file system to store the Wordpress files.
 
-EFS mount targets: The mount points that allow EC2 instances to access the EFS file system.
+- EFS mount targets: The mount points that allow EC2 instances to access the EFS file system.
 
-Aurora MySQL database cluster: The database instance that stores the Wordpress data.
+- Aurora MySQL database cluster: The database instance that stores the Wordpress data.
 
-Public Application Load Balancer: The load balancer that routes traffic to the EC2 instances running Wordpress.
+- Public Application Load Balancer: The load balancer that routes traffic to the EC2 instances running Wordpress.
 
-ELB listener: The listener that listens to traffic on port 80 and forwards it to the target group.
+- ELB listener: The listener that listens to traffic on port 80 and forwards it to the target group.
 
-ELB target group: The target group that routes traffic to the EC2 instances running Wordpress.
+- ELB target group: The target group that routes traffic to the EC2 instances running Wordpress.
 
 # Final Step
 
